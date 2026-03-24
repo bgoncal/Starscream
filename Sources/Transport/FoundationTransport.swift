@@ -97,21 +97,21 @@ public class FoundationTransport: NSObject, Transport, StreamDelegate {
     public func disconnect() {
         // Capture strong references before niling the instance vars.
         // CFReadStreamSetDispatchQueue(stream, nil) stops future event blocks from being
-        // enqueued, but blocks already in the queue hold a raw C pointer to the CFStream
-        // and will still execute. If the streams are deallocated before those blocks run,
-        // CFRetain/CFRelease inside _signalEventSync crashes with a pointer-authentication
-        // trap (EXC_BREAKPOINT SIGTRAP). Holding the streams alive in a trailing async
-        // block on the same serial queue guarantees they outlive all preceding callbacks.
+        // enqueued, but blocks already in the queue hold a raw C pointer to the CFStream's
+        // internal __NSCFStreamWeakDelegateWrapper. Setting stream.delegate = nil frees
+        // that wrapper immediately; the queued blocks then crash with objc_retain on the
+        // freed wrapper inside _signalEventSync (EXC_BREAKPOINT SIGTRAP / EXC_BAD_ACCESS).
+        // Fix: defer delegate = nil to the trailing workQueue block, which executes only
+        // after all previously-enqueued CFStream callbacks have already run. The streams
+        // themselves are kept alive by the same block via ARC captures.
         let capturedInput = inputStream
         let capturedOutput = outputStream
 
         if let stream = capturedInput {
-            stream.delegate = nil
             CFReadStreamSetDispatchQueue(stream, nil)
             stream.close()
         }
         if let stream = capturedOutput {
-            stream.delegate = nil
             CFWriteStreamSetDispatchQueue(stream, nil)
             stream.close()
         }
@@ -119,7 +119,11 @@ public class FoundationTransport: NSObject, Transport, StreamDelegate {
         outputStream = nil
         inputStream = nil
 
-        workQueue.async { _ = (capturedInput, capturedOutput) }
+        workQueue.async {
+            capturedInput?.delegate = nil
+            capturedOutput?.delegate = nil
+            _ = (capturedInput, capturedOutput)
+        }
     }
     
     public func register(delegate: TransportEventClient) {
