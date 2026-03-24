@@ -95,12 +95,22 @@ public class FoundationTransport: NSObject, Transport, StreamDelegate {
     }
     
     public func disconnect() {
-        if let stream = inputStream {
+        // Capture strong references before niling the instance vars.
+        // CFReadStreamSetDispatchQueue(stream, nil) stops future event blocks from being
+        // enqueued, but blocks already in the queue hold a raw C pointer to the CFStream
+        // and will still execute. If the streams are deallocated before those blocks run,
+        // CFRetain/CFRelease inside _signalEventSync crashes with a pointer-authentication
+        // trap (EXC_BREAKPOINT SIGTRAP). Holding the streams alive in a trailing async
+        // block on the same serial queue guarantees they outlive all preceding callbacks.
+        let capturedInput = inputStream
+        let capturedOutput = outputStream
+
+        if let stream = capturedInput {
             stream.delegate = nil
             CFReadStreamSetDispatchQueue(stream, nil)
             stream.close()
         }
-        if let stream = outputStream {
+        if let stream = capturedOutput {
             stream.delegate = nil
             CFWriteStreamSetDispatchQueue(stream, nil)
             stream.close()
@@ -108,6 +118,8 @@ public class FoundationTransport: NSObject, Transport, StreamDelegate {
         isOpen = false
         outputStream = nil
         inputStream = nil
+
+        workQueue.async { _ = (capturedInput, capturedOutput) }
     }
     
     public func register(delegate: TransportEventClient) {
